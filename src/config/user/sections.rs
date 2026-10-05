@@ -452,6 +452,13 @@ pub struct SwitchConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cd: Option<bool>,
 
+    /// Navigate to an expected-path worktree on another branch (default: false)
+    #[serde(
+        rename = "allow-branch-mismatch",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_branch_mismatch: Option<bool>,
+
     /// Picker settings for the interactive selector
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picker: Option<SwitchPickerConfig>,
@@ -462,12 +469,18 @@ impl SwitchConfig {
     pub fn cd(&self) -> bool {
         self.cd.unwrap_or(true)
     }
+
+    /// Navigate to an expected-path worktree on another branch (default: false)
+    pub fn allow_branch_mismatch(&self) -> bool {
+        self.allow_branch_mismatch.unwrap_or(false)
+    }
 }
 
 impl Merge for SwitchConfig {
     fn merge_with(&self, other: &Self) -> Self {
         Self {
             cd: other.cd.or(self.cd),
+            allow_branch_mismatch: other.allow_branch_mismatch.or(self.allow_branch_mismatch),
             picker: merge_optional(self.picker.as_ref(), other.picker.as_ref()),
         }
     }

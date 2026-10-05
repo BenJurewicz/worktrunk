@@ -1222,6 +1222,24 @@ fn test_switch_config_cd_accessor() {
 }
 
 #[test]
+fn test_switch_config_allow_branch_mismatch() {
+    let config = UserConfig::load_from_str(
+        r#"
+[switch]
+allow-branch-mismatch = true
+
+[projects."example"]
+switch.allow-branch-mismatch = false
+"#,
+    )
+    .unwrap();
+    assert!(!super::SwitchConfig::default().allow_branch_mismatch());
+    assert!(config.switch(None).allow_branch_mismatch());
+    assert!(!config.switch(Some("example")).allow_branch_mismatch());
+    assert!(config.switch(Some("other")).allow_branch_mismatch());
+}
+
+#[test]
 fn test_switch_config_cd_merge() {
     use crate::config::user::{Merge, SwitchConfig};
 
