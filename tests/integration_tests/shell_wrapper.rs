@@ -819,6 +819,30 @@ mod unix_tests {
         assert_eq!(fs::read_dir(temporary).unwrap().count(), 0);
     }
 
+    #[rstest]
+    fn test_wrapper_switch_allow_branch_mismatch(mut repo: TestRepo) {
+        let path = repo.add_worktree("feature");
+        repo.run_git_in(&path, &["switch", "-c", "bugfix"]);
+        let mut script = String::new();
+        append_wrapper_setup(&mut script, "bash", &repo);
+        script.push_str("wt switch feature --allow-branch-mismatch --no-hooks\n");
+        script.push_str("printf 'LOCATION:%s\\n' \"$PWD\"\n");
+        let config = repo.test_config_path().to_string_lossy();
+        let approvals = repo.test_approvals_path().to_string_lossy();
+        let env_vars = build_test_env_vars(&config, &approvals);
+        let (combined, exit_code) =
+            exec_in_pty_shell("bash", &script, repo.root_path(), &env_vars, &[], false);
+        assert_eq!(exit_code, 0, "{combined}");
+        assert!(
+            combined.contains(&format!("LOCATION:{}", path.display())),
+            "{combined}"
+        );
+        assert!(
+            combined.contains("switching to that worktree"),
+            "{combined}"
+        );
+    }
+
     // ========================================================================
     // Cross-Shell Error Handling Tests
     // ========================================================================

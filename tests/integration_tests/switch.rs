@@ -2119,6 +2119,50 @@ fn test_switch_allow_branch_mismatch_detached(mut repo: TestRepo) {
 }
 
 #[rstest]
+fn test_switch_allow_branch_mismatch_detached_hook_identity(mut repo: TestRepo) {
+    let path = repo.add_worktree("feature");
+    repo.run_git_in(
+        &path,
+        &["commit", "--allow-empty", "-m", "Destination commit"],
+    );
+    repo.run_git_in(&path, &["checkout", "--detach"]);
+    let commit = repo
+        .git_command()
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&path)
+        .run()
+        .unwrap()
+        .stdout;
+    repo.write_project_config(r#"
+pre-switch = "echo '{{ branch | default('detached') }}|{{ target | default('detached') }}|{{ commit }}' > '{{ repo_path }}/pre.txt'"
+"#);
+    let output = repo
+        .wt_command()
+        .args([
+            "switch",
+            "feature",
+            "--allow-branch-mismatch",
+            "--yes",
+            "--no-cd",
+            "--format=json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json.get("branch").is_none());
+    assert_eq!(
+        fs::read_to_string(repo.root_path().join("pre.txt"))
+            .unwrap()
+            .trim(),
+        format!(
+            "detached|detached|{}",
+            String::from_utf8_lossy(&commit).trim()
+        )
+    );
+}
+
+#[rstest]
 fn test_switch_allow_branch_mismatch_hooks(mut repo: TestRepo) {
     let path = repo.add_worktree("feature");
     repo.run_git_in(&path, &["switch", "-c", "bugfix"]);
@@ -2162,6 +2206,205 @@ post-start = "echo unexpected > '{{ repo_path }}/created.txt'"
         format!("bugfix|bugfix|{path_text}")
     );
     assert!(!repo.root_path().join("created.txt").exists());
+}
+
+#[rstest]
+#[case::create("fresh", &["--create"])]
+#[case::explicit_path("feature", &["--path", "../repo.feature"])]
+#[case::missing_branch("missing", &[])]
+fn test_switch_allow_branch_mismatch_strict(
+    mut repo: TestRepo,
+    #[case] branch: &str,
+    #[case] flags: &[&str],
+) {
+    let path = repo.add_worktree("feature");
+    repo.run_git_in(&path, &["switch", "-c", "bugfix"]);
+    repo.write_test_config("worktree-path = '../repo.feature'");
+    let (cd_path, _guard) = directive_file();
+    let mut cmd = repo.wt_command();
+    cmd.args(["switch", branch, "--allow-branch-mismatch", "--no-hooks"])
+        .args(flags);
+    configure_directive_file(&mut cmd, &cd_path);
+    let output = cmd.output().unwrap();
+    assert!(!output.status.success(), "{:?}", output);
+    assert!(fs::read_to_string(cd_path).unwrap_or_default().is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("switching to that worktree"));
+}
+
+#[rstest]
+#[case::missing_directory(false)]
+#[case::broken_registration(true)]
+fn test_switch_allow_branch_mismatch_unusable(mut repo: TestRepo, #[case] recreate: bool) {
+    let path = repo.add_worktree("feature");
+    repo.run_git_in(&path, &["switch", "-c", "bugfix"]);
+    fs::remove_dir_all(&path).unwrap();
+    if recreate {
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep.txt"), "keep").unwrap();
+    }
+    let output = repo
+        .wt_command()
+        .args(["switch", "feature", "--allow-branch-mismatch", "--no-hooks"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{:?}", output);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("switching to that worktree"));
+    if recreate {
+        assert_eq!(fs::read_to_string(path.join("keep.txt")).unwrap(), "keep");
+    }
+}
+
+#[rstest]
+#[case::branch_change("git -C '{{ target_worktree_path }}' switch -c moved")]
+#[case::worktree_removed("git worktree remove '{{ target_worktree_path }}'")]
+#[case::hook_failure("exit 1")]
+fn test_switch_allow_branch_mismatch_hook_failure(mut repo: TestRepo, #[case] hook: &str) {
+    let path = repo.add_worktree("feature");
+    repo.run_git_in(&path, &["switch", "-c", "bugfix"]);
+    repo.write_project_config(&format!("pre-switch = \"{hook}\""));
+    let (cd_path, _guard) = directive_file();
+    let mut cmd = repo.wt_command();
+    cmd.args(["switch", "feature", "--allow-branch-mismatch", "--yes"]);
+    configure_directive_file(&mut cmd, &cd_path);
+    let output = cmd.output().unwrap();
+    assert!(!output.status.success(), "{:?}", output);
+    assert!(fs::read_to_string(cd_path).unwrap_or_default().is_empty());
+    if hook != "exit 1" {
+        assert!(String::from_utf8_lossy(&output.stderr).contains("changed after selection"));
+    }
+}
+
+#[rstest]
+fn test_switch_allow_branch_mismatch_hook_creates_destination(repo: TestRepo) {
+    repo.run_git(&["branch", "feature"]);
+    repo.write_project_config(
+        r#"
+pre-switch = "git worktree add '{{ repo_path }}/../repo.feature' feature"
+"#,
+    );
+    let output = repo
+        .wt_command()
+        .args([
+            "switch",
+            "feature",
+            "--allow-branch-mismatch",
+            "--yes",
+            "--no-cd",
+            "--format=json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["action"], "existing");
+    assert_eq!(json["branch"], "feature");
+}
+
+#[rstest]
+fn test_switch_allow_branch_mismatch_branch_priority(mut repo: TestRepo) {
+    let collision = repo.add_worktree("feature");
+    repo.run_git_in(&collision, &["switch", "-c", "bugfix"]);
+    let actual = repo.root_path().parent().unwrap().join("elsewhere");
+    repo.run_git(&["worktree", "add", actual.to_str().unwrap(), "feature"]);
+    let output = repo
+        .wt_command()
+        .args([
+            "switch",
+            "feature",
+            "--allow-branch-mismatch",
+            "--no-hooks",
+            "--format=json",
+            "--no-cd",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["branch"], "feature");
+    assert_eq!(Path::new(json["path"].as_str().unwrap()), actual);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("switching to that worktree"));
+}
+
+#[rstest]
+fn test_switch_allow_branch_mismatch_unregistered_directory(repo: TestRepo) {
+    repo.run_git(&["branch", "feature"]);
+    let path = repo.root_path().parent().unwrap().join("repo.feature");
+    fs::create_dir(&path).unwrap();
+    fs::write(path.join("keep.txt"), "keep").unwrap();
+    let output = repo
+        .wt_command()
+        .args(["switch", "feature", "--allow-branch-mismatch", "--no-hooks"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{:?}", output);
+    assert_eq!(fs::read_to_string(path.join("keep.txt")).unwrap(), "keep");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("switching to that worktree"));
+}
+
+#[rstest]
+fn test_switch_allow_branch_mismatch_pr(#[from(repo_with_remote)] mut repo: TestRepo) {
+    let path = repo.add_worktree("feature");
+    repo.run_git(&["push", "origin", "feature"]);
+    repo.run_git_in(&path, &["switch", "-c", "bugfix"]);
+    set_github_remote_url(&repo);
+    repo.write_project_config("[forge]\nplatform = 'github'");
+    repo.write_test_config("[switch]\nallow-branch-mismatch = true");
+    let mock_bin = setup_mock_gh_for_pr(
+        &repo,
+        r#"{
+        "title": "Feature", "user": {"login": "alice"}, "state": "open", "draft": false,
+        "head": {"ref": "feature", "repo": {"name": "test-repo", "owner": {"login": "owner"}}},
+        "base": {"ref": "main", "repo": {"name": "test-repo", "owner": {"login": "owner"}}},
+        "html_url": "https://github.com/owner/test-repo/pull/101"
+    }"#,
+    );
+    let mut cmd = repo.wt_command();
+    cmd.args(["switch", "pr:101", "--allow-branch-mismatch", "--no-hooks"]);
+    configure_mock_cli_env(&mut cmd, &mock_bin);
+    let output = cmd.output().unwrap();
+    assert!(!output.status.success(), "{:?}", output);
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .ansi_strip()
+        .to_string();
+    assert!(stderr.contains("Cannot switch to feature"), "{stderr}");
+    assert!(!stderr.contains("switching to that worktree"));
+}
+
+#[rstest]
+#[case::default_branch("^", false)]
+#[case::already_at("main", true)]
+fn test_switch_allow_branch_mismatch_main(
+    mut repo: TestRepo,
+    #[case] selector: &str,
+    #[case] already_at: bool,
+) {
+    repo.run_git(&["switch", "-c", "other"]);
+    let source = repo.add_worktree("source");
+    let (cd_path, _guard) = directive_file();
+    let mut cmd = repo.wt_command();
+    cmd.current_dir(if already_at {
+        repo.root_path()
+    } else {
+        &source
+    })
+    .args([
+        "switch",
+        selector,
+        "--allow-branch-mismatch",
+        "--no-hooks",
+        "--format=json",
+        "--no-cd",
+    ]);
+    configure_directive_file(&mut cmd, &cd_path);
+    let output = cmd.output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["branch"], "other");
+    assert_eq!(
+        json["action"],
+        if already_at { "already_at" } else { "existing" }
+    );
+    assert!(fs::read_to_string(cd_path).unwrap_or_default().is_empty());
 }
 
 /// Switch to a detached worktree by absolute path (#1661).

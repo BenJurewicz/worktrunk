@@ -3,6 +3,8 @@
 //! Planning and executing worktree switches, plus [`SwitchPipeline`] — the
 //! full switch sequence (bare-repo fix-up, hooks, approval, execution, output)
 //! shared by the `wt switch` argument path and the interactive picker.
+//! Opt-in branch mismatches select an existing expected-path checkout before
+//! pre-switch hooks, then revalidate its identity against a fresh listing.
 
 use std::path::{Path, PathBuf};
 
@@ -862,11 +864,8 @@ impl BranchMismatch {
     }
 
     fn require_unchanged(&self, repo: &Repository) -> anyhow::Result<()> {
-        // Pre-switch hooks may change HEAD or remove the worktree. A fresh
-        // repository avoids the invoking repository's cached worktree listing.
-        let fresh = Repository::at(repo.current_worktree().path())?;
-        let occupant = fresh.worktree_at_path(&self.path)?;
-        if fresh.worktree_is_unusable(&self.path)?
+        let occupant = repo.worktree_at_path(&self.path)?;
+        if repo.worktree_is_unusable(&self.path)?
             || !occupant.is_some_and(|(_, branch)| branch == self.branch)
         {
             let path = format_path_for_display(&self.path);
@@ -1715,6 +1714,12 @@ fn run_pre_switch_hooks(
             );
         if let Some(p) = dest_path.as_deref() {
             vars = vars.with_target_worktree_path(p).with_active_worktree(p);
+            if mismatch.is_some_and(|mismatch| mismatch.branch.is_none())
+                && let Some(commit) = repo.worktree_at(p).head_sha()?
+            {
+                let short_commit = repo.short_sha(&commit)?;
+                vars = vars.with_active_commit(&commit, &short_commit);
+            }
         }
         let extra_vars = vars.as_extra_vars();
 
@@ -1974,7 +1979,8 @@ impl SwitchPipeline<'_> {
                 .switch
                 .allow_branch_mismatch()
         });
-        let mismatch = if allow_mismatch && !create && path.is_none() && ref_target.is_none() {
+        let select_mismatch = allow_mismatch && !create && path.is_none() && ref_target.is_none();
+        let mismatch = if select_mismatch {
             let target = resolve_switch_target(repo, identifier, None, create, base)?;
             let mismatch = select_branch_mismatch(repo, &target, config)?;
             ref_target = Some(target);
@@ -2010,9 +2016,16 @@ impl SwitchPipeline<'_> {
         // returns empty on the recovered path (no live source worktree).
         let (source_branch, source_path) = capture_switch_source(repo, is_recovered);
 
+        // Opt-in selection reads the worktree listing before pre-switch hooks.
+        // Rebuild it for planning: hooks may create a destination, or change
+        // the branch or registration of a selected fallback.
+        let planning_repo = select_mismatch
+            .then(|| Repository::at(repo.current_worktree().path()))
+            .transpose()?;
+
         // Validate and resolve the target branch.
         let plan = plan_switch(
-            repo,
+            planning_repo.as_ref().unwrap_or(repo),
             identifier,
             ref_target,
             create,
