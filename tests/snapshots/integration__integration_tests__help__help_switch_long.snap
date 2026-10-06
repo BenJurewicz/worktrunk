@@ -290,6 +290,17 @@ Requires [2mgh[0m (GitHub), [2mglab[0m (GitLab), or an equivalent CLI instal
 
 To change which branch a worktree is on, use [2mgit switch[0m inside that worktree.
 
+Use [2m--allow-branch-mismatch[0m to navigate to an existing worktree at the expected
+path even when it is on another branch or detached. A warning names the actual
+checkout; its branch stays unchanged. Hooks and [2m--execute[0m use that checkout.
+Branch lookup still takes priority if the requested branch has a worktree elsewhere.
+
+[107m [0m [2m[0m[2m[34mwt[0m[2m switch feature [0m[2m[36m--allow-branch-mismatch[0m
+
+Set [2mswitch.allow-branch-mismatch = true[0m in user configuration to enable this
+by default, or use [2m--no-allow-branch-mismatch[0m to require the requested branch
+for one command. This setting does not apply to [2m--create[0m, [2m--path[0m, or PR/MR selectors.
+
 [1m[32mSee also[0m
 
 - [2mwt list[0m — View all worktrees

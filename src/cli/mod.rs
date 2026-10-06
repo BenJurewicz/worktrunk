@@ -805,6 +805,19 @@ Requires `gh` (GitHub), `glab` (GitLab), or an equivalent CLI installed and auth
 
 To change which branch a worktree is on, use `git switch` inside that worktree.
 
+Use `--allow-branch-mismatch` to navigate to an existing worktree at the expected
+path even when it is on another branch or detached. A warning names the actual
+checkout; its branch stays unchanged. Hooks and `--execute` use that checkout.
+Branch lookup still takes priority if the requested branch has a worktree elsewhere.
+
+```console
+$ wt switch feature --allow-branch-mismatch
+```
+
+Set `switch.allow-branch-mismatch = true` in user configuration to enable this
+by default, or use `--no-allow-branch-mismatch` to require the requested branch
+for one command. This setting does not apply to `--create`, `--path`, or PR/MR selectors.
+
 ## See also
 
 - [`wt list`](/list/) — View all worktrees
@@ -2309,6 +2322,7 @@ delete-branch = true   # Delete branch after removal (--no-delete-branch to keep
 ```toml
 [switch]
 cd = true          # Change directory after switching (--no-cd to skip)
+allow-branch-mismatch = false   # Navigate to an expected-path worktree on another branch
 
 [switch.picker]
 pager = "delta --paging=never"   # Example: override git's core.pager for diff preview

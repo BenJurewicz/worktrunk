@@ -333,6 +333,7 @@ Persistent flag values for [2mwt remove[0m. Override on command line as needed
 
 [107m [0m [2m[36m[switch][0m
 [107m [0m [2mcd = [0m[2m[33mtrue[0m[2m          [0m[2m# Change directory after switching (--no-cd to skip)[0m
+[107m [0m [2mallow-branch-mismatch = [0m[2m[33mfalse[0m[2m   [0m[2m# Navigate to an expected-path worktree on another branch[0m
 [107m [0m 
 [107m [0m [2m[36m[switch.picker][0m
 [107m [0m [2mpager = [0m[2m[32m"delta --paging=never"[0m[2m   [0m[2m# Example: override git's core.pager for diff preview[0m

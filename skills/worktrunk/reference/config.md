@@ -307,6 +307,7 @@ delete-branch = true   # Delete branch after removal (--no-delete-branch to keep
 ```toml
 [switch]
 cd = true          # Change directory after switching (--no-cd to skip)
+allow-branch-mismatch = false   # Navigate to an expected-path worktree on another branch
 
 [switch.picker]
 pager = "delta --paging=never"   # Example: override git's core.pager for diff preview
