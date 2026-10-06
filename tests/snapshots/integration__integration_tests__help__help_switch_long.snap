@@ -98,6 +98,14 @@ Usage: [1m[36mwt switch[0m [36m[OPTIONS][0m [36m[BRANCH][0m [1m[36m[--
       [1m[36m--clobber[0m
           Remove stale paths at target
 
+      [1m[36m--allow-branch-mismatch[0m
+          Navigate to an expected-path worktree on another branch, with a warning[0m
+          
+          Leaves the checked-out branch unchanged. Also allows detached worktrees. Does not apply to --create, --path, or PR/MR selectors. Overrides switch.allow-branch-mismatch in user configuration.[0m
+
+      [1m[36m--no-allow-branch-mismatch[0m
+          Require the requested branch, overriding switch.allow-branch-mismatch
+
       [1m[36m--no-cd[0m
           Skip directory change after switching[0m
           

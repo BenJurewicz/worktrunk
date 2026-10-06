@@ -441,6 +441,18 @@ pub(crate) struct SwitchArgs {
     #[arg(long, requires = "branch")]
     pub(crate) clobber: bool,
 
+    /// Navigate to an expected-path worktree on another branch, with a warning
+    ///
+    /// Leaves the checked-out branch unchanged. Also allows detached worktrees.
+    /// Does not apply to --create, --path, or PR/MR selectors.
+    /// Overrides switch.allow-branch-mismatch in user configuration.
+    #[arg(long, requires = "branch", overrides_with = "no_allow_branch_mismatch")]
+    pub(crate) allow_branch_mismatch: bool,
+
+    /// Require the requested branch, overriding switch.allow-branch-mismatch
+    #[arg(long, requires = "branch", overrides_with = "allow_branch_mismatch")]
+    pub(crate) no_allow_branch_mismatch: bool,
+
     /// Skip directory change after switching
     ///
     /// Hooks still run normally, and an `--execute` program still starts in

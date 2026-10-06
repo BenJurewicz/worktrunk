@@ -2213,6 +2213,7 @@ pub fn handle_picker(
             base: None,
             path: None,
             clobber: false,
+            allow_branch_mismatch: None,
             verify: true,
             yes: false,
             change_dir,

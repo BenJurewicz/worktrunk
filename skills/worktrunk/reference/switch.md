@@ -229,6 +229,16 @@ Options:
       --clobber
           Remove stale paths at target
 
+      --allow-branch-mismatch
+          Navigate to an expected-path worktree on another branch, with a warning
+
+          Leaves the checked-out branch unchanged. Also allows detached worktrees. Does not apply to
+          --create, --path, or PR/MR selectors. Overrides switch.allow-branch-mismatch in user
+          configuration.
+
+      --no-allow-branch-mismatch
+          Require the requested branch, overriding switch.allow-branch-mismatch
+
       --no-cd
           Skip directory change after switching
 

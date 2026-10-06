@@ -807,6 +807,77 @@ fn validate_worktree_creation(
     .into())
 }
 
+/// An explicitly allowed expected-path collision. Keep the requested branch
+/// separate from the checkout identity used by hooks, output, and execution.
+struct BranchMismatch {
+    requested_branch: String,
+    path: PathBuf,
+    branch: Option<String>,
+}
+
+fn select_branch_mismatch(
+    repo: &Repository,
+    target: &ResolvedTarget,
+    config: &UserConfig,
+) -> anyhow::Result<Option<BranchMismatch>> {
+    if !matches!(
+        repo.resolve_selector(&target.selector)?,
+        ResolvedWorktree::BranchOnly { .. }
+    ) || !repo.branch(target.selector.token()).exists()?
+    {
+        return Ok(None);
+    }
+    let expected = compute_worktree_path(repo, target.selector.token(), config)?;
+    let Some((path, branch)) = repo.worktree_at_path(&expected)? else {
+        return Ok(None);
+    };
+    if repo.worktree_is_unusable(&path)? {
+        return Err(GitError::worktree_missing(
+            branch.unwrap_or_else(|| worktrunk::git::path_dir_name(&path).to_string()),
+            &path,
+        )
+        .into());
+    }
+    Ok(Some(BranchMismatch {
+        requested_branch: target.selector.token().to_string(),
+        path: operational_worktree_path(path),
+        branch,
+    }))
+}
+
+impl BranchMismatch {
+    fn warn(&self) {
+        let requested = &self.requested_branch;
+        let path = format_path_for_display(&self.path);
+        let occupant = match &self.branch {
+            Some(branch) => cformat!("on branch <bold>{branch}</>"),
+            None => "detached".to_string(),
+        };
+        eprintln!(
+            "{}",
+            warning_message(cformat!(
+                "Expected worktree for <bold>{requested}</> @ <bold>{path}</> is {occupant}; switching to that worktree"
+            ))
+        );
+    }
+
+    fn require_unchanged(&self, repo: &Repository) -> anyhow::Result<()> {
+        // Pre-switch hooks may change HEAD or remove the worktree. A fresh
+        // repository avoids the invoking repository's cached worktree listing.
+        let fresh = Repository::at(repo.current_worktree().path())?;
+        let occupant = fresh.worktree_at_path(&self.path)?;
+        if fresh.worktree_is_unusable(&self.path)?
+            || !occupant.is_some_and(|(_, branch)| branch == self.branch)
+        {
+            let path = format_path_for_display(&self.path);
+            bail!(cformat!(
+                "Worktree @ <bold>{path}</> changed after selection; run switch again"
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Set up a local branch and its worktree for a fork PR or MR.
 ///
 /// One `git worktree add -b <branch> -- <path> FETCH_HEAD` creates the branch
@@ -920,9 +991,19 @@ fn plan_switch(
     path: Option<&Path>,
     clobber: bool,
     config: &UserConfig,
+    mismatch: Option<&BranchMismatch>,
 ) -> anyhow::Result<SwitchPlan> {
     // Record current branch for `wt switch -` support
     let new_previous = repo.current_worktree().branch().ok().flatten();
+
+    if let Some(mismatch) = mismatch {
+        mismatch.require_unchanged(repo)?;
+        return Ok(SwitchPlan::Existing {
+            path: mismatch.path.clone(),
+            branch: mismatch.branch.clone(),
+            new_previous,
+        });
+    }
 
     // Phase 1: Resolve target (validates --create/--base; `pr:`/`mr:` arrived
     // pre-resolved from the caller, ahead of the pre-switch hooks)
@@ -1561,6 +1642,7 @@ struct SwitchOptions<'a> {
     execute_args: &'a [String],
     yes: bool,
     clobber: bool,
+    allow_branch_mismatch: Option<bool>,
     /// Resolved from --cd/--no-cd flags: Some(true) = cd, Some(false) = no cd, None = use config
     change_dir: Option<bool>,
     verify: bool,
@@ -1586,6 +1668,7 @@ fn run_pre_switch_hooks(
     config: &UserConfig,
     target_branch: &str,
     ref_target: Option<&ResolvedTarget>,
+    mismatch: Option<&BranchMismatch>,
     yes: bool,
 ) -> anyhow::Result<()> {
     let current_wt = repo.current_worktree();
@@ -1601,7 +1684,11 @@ fn run_pre_switch_hooks(
             .map(|s| s.token().to_string())
             .unwrap_or_else(|_| target_branch.to_string()),
     };
-    let pre_ctx = CommandContext::new(repo, config, Some(&resolved_target), &current_path, yes);
+    let target_branch = match mismatch {
+        Some(mismatch) => mismatch.branch.as_deref(),
+        None => Some(resolved_target.as_str()),
+    };
+    let pre_ctx = CommandContext::new(repo, config, target_branch, &current_path, yes);
 
     let pre_switch_approved = approve_hooks(&pre_ctx, &[HookType::PreSwitch])?;
     if pre_switch_approved {
@@ -1613,12 +1700,15 @@ fn run_pre_switch_hooks(
         // matching `branch` and what `wt hook pre-switch` already renders
         // there (issue #4009).
         let base_branch = current_wt.branch().ok().flatten();
-        let dest_path = repo.worktree_for_branch(&resolved_target).ok().flatten();
+        let dest_path = match mismatch {
+            Some(mismatch) => Some(mismatch.path.clone()),
+            None => repo.worktree_for_branch(&resolved_target).ok().flatten(),
+        };
 
         let ref_identity = ref_target.and_then(|t| t.ref_identity.as_ref());
         let mut vars = TemplateVars::new()
             .with_base(base_branch.as_deref(), &current_path)
-            .with_target(&resolved_target)
+            .with_target_opt(target_branch)
             .with_pr(
                 ref_identity.map(|id| id.number),
                 ref_identity.map(|id| id.url.as_str()),
@@ -1811,6 +1901,7 @@ pub(crate) struct SwitchPipeline<'a> {
     /// template.
     pub path: Option<&'a Path>,
     pub clobber: bool,
+    pub allow_branch_mismatch: Option<bool>,
     pub verify: bool,
     /// `--yes`: skip approval prompts and force past clobber checks.
     pub yes: bool,
@@ -1846,6 +1937,7 @@ impl SwitchPipeline<'_> {
             base,
             path,
             clobber,
+            allow_branch_mismatch,
             verify,
             yes,
             change_dir,
@@ -1866,7 +1958,7 @@ impl SwitchPipeline<'_> {
         // raw token. This is the one resolution that reaches the forge, and it
         // is bounded to the argument form that asked for it; the resolved
         // target is handed to `plan_switch`, which queries nothing further.
-        let ref_target = resolve_ref_shortcut_target(repo, identifier, create, base)?;
+        let mut ref_target = resolve_ref_shortcut_target(repo, identifier, create, base)?;
         // Kept past the move into `plan_switch`: a `pr:N` switch onto a branch
         // that already has a worktree produces `SwitchResult::Existing`, which
         // carries no PR identity of its own, and the hooks on that path should
@@ -1875,6 +1967,25 @@ impl SwitchPipeline<'_> {
             .as_ref()
             .and_then(|target| target.ref_identity.clone());
 
+        let allow_mismatch = allow_branch_mismatch.unwrap_or_else(|| {
+            let project = repo.project_identifier().ok();
+            config
+                .resolved(project.as_deref())
+                .switch
+                .allow_branch_mismatch()
+        });
+        let mismatch = if allow_mismatch && !create && path.is_none() && ref_target.is_none() {
+            let target = resolve_switch_target(repo, identifier, None, create, base)?;
+            let mismatch = select_branch_mismatch(repo, &target, config)?;
+            ref_target = Some(target);
+            mismatch
+        } else {
+            None
+        };
+        if let Some(mismatch) = &mismatch {
+            mismatch.warn();
+        }
+
         // Run pre-switch hooks before worktree creation. run_pre_switch_hooks
         // resolves symbolic args (`-`, `@`, `^`) first, so {{ branch }} and
         // {{ target }} carry the concrete destination, not the raw token. Skip
@@ -1882,7 +1993,14 @@ impl SwitchPipeline<'_> {
         // against. `yes` is the single switch-wide flag, so the picker (no
         // `--yes`) and the argument path gate `pre-switch` hooks identically.
         if verify && !is_recovered {
-            run_pre_switch_hooks(repo, config, identifier, ref_target.as_ref(), yes)?;
+            run_pre_switch_hooks(
+                repo,
+                config,
+                identifier,
+                ref_target.as_ref(),
+                mismatch.as_ref(),
+                yes,
+            )?;
         }
 
         // Capture source (base) worktree identity BEFORE the switch, for
@@ -1894,7 +2012,15 @@ impl SwitchPipeline<'_> {
 
         // Validate and resolve the target branch.
         let plan = plan_switch(
-            repo, identifier, ref_target, create, base, path, clobber, config,
+            repo,
+            identifier,
+            ref_target,
+            create,
+            base,
+            path,
+            clobber,
+            config,
+            mismatch.as_ref(),
         )
         .map_err(|err| match suggestion_ctx {
             Some(ref ctx) => match err.downcast::<GitError>() {
@@ -2075,6 +2201,7 @@ fn run_switch(
         execute_args,
         yes,
         clobber,
+        allow_branch_mismatch,
         change_dir: change_dir_flag,
         verify,
         format,
@@ -2115,6 +2242,7 @@ fn run_switch(
         base,
         path,
         clobber,
+        allow_branch_mismatch,
         verify,
         yes,
         change_dir,
@@ -2169,6 +2297,10 @@ pub fn handle_switch_command(args: SwitchArgs, yes: bool) -> anyhow::Result<()> 
                     execute_args: &args.execute_args,
                     yes,
                     clobber: args.clobber,
+                    allow_branch_mismatch: flag_pair(
+                        args.allow_branch_mismatch,
+                        args.no_allow_branch_mismatch,
+                    ),
                     change_dir: change_dir_flag,
                     verify,
                     format: args.format,
