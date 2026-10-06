@@ -2036,6 +2036,134 @@ fn test_switch_error_path_occupied_detached(repo: TestRepo) {
     snapshot_switch_with_directive_file("switch_error_path_occupied_detached", &repo, &["feature"]);
 }
 
+#[rstest]
+#[case::flag("", &["--allow-branch-mismatch"], true)]
+#[case::config("[switch]\nallow-branch-mismatch = true", &[], true)]
+#[case::override_config("[switch]\nallow-branch-mismatch = true", &["--no-allow-branch-mismatch"], false)]
+#[case::override_false("[switch]\nallow-branch-mismatch = false", &["--allow-branch-mismatch"], true)]
+fn test_switch_allow_branch_mismatch(
+    mut repo: TestRepo,
+    #[case] config: &str,
+    #[case] flags: &[&str],
+    #[case] success: bool,
+) {
+    let path = repo.add_worktree("feature");
+    repo.run_git_in(&path, &["switch", "-c", "bugfix"]);
+    fs::write(path.join("untracked.txt"), "keep").unwrap();
+    let before = repo
+        .git_command()
+        .args(["worktree", "list", "--porcelain"])
+        .run()
+        .unwrap()
+        .stdout;
+    repo.write_test_config(config);
+    let (cd_path, _guard) = directive_file();
+    let mut cmd = repo.wt_command();
+    cmd.args(["switch", "feature", "--format=json", "--no-hooks"])
+        .args(flags);
+    configure_directive_file(&mut cmd, &cd_path);
+    let output = cmd.output().unwrap();
+    assert_eq!(output.status.success(), success, "{:?}", output);
+    if success {
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["action"], "existing");
+        assert_eq!(json["branch"], "bugfix");
+        assert_eq!(Path::new(json["path"].as_str().unwrap()), path);
+        assert_eq!(
+            fs::read_to_string(&cd_path).unwrap().trim(),
+            path.to_str().unwrap()
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("switching to that worktree"));
+    } else {
+        assert!(fs::read_to_string(&cd_path).unwrap_or_default().is_empty());
+    }
+    assert_eq!(
+        fs::read_to_string(path.join("untracked.txt")).unwrap(),
+        "keep"
+    );
+    let worktrees = repo
+        .git_command()
+        .args(["worktree", "list", "--porcelain"])
+        .run()
+        .unwrap();
+    assert_eq!(worktrees.stdout, before);
+    let head = repo
+        .git_command()
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(&path)
+        .run()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "bugfix");
+}
+
+#[rstest]
+fn test_switch_allow_branch_mismatch_warning(mut repo: TestRepo) {
+    let path = repo.add_worktree("feature");
+    repo.run_git_in(&path, &["switch", "-c", "bugfix"]);
+    snapshot_switch_with_directive_file(
+        "switch_allow_branch_mismatch",
+        &repo,
+        &["feature", "--allow-branch-mismatch"],
+    );
+}
+
+#[rstest]
+fn test_switch_allow_branch_mismatch_detached(mut repo: TestRepo) {
+    let path = repo.add_worktree("feature");
+    repo.run_git_in(&path, &["checkout", "--detach"]);
+    snapshot_switch_with_directive_file(
+        "switch_allow_branch_mismatch_detached",
+        &repo,
+        &["feature", "--allow-branch-mismatch"],
+    );
+}
+
+#[rstest]
+fn test_switch_allow_branch_mismatch_hooks(mut repo: TestRepo) {
+    let path = repo.add_worktree("feature");
+    repo.run_git_in(&path, &["switch", "-c", "bugfix"]);
+    repo.write_project_config(r#"
+pre-switch = "echo '{{ branch }}|{{ target }}|{{ target_worktree_path }}|{{ worktree_path }}' > '{{ repo_path }}/pre.txt'"
+post-switch = "echo '{{ branch }}|{{ target }}|{{ worktree_path }}' > '{{ repo_path }}/post.txt'"
+pre-start = "exit 1"
+post-start = "echo unexpected > '{{ repo_path }}/created.txt'"
+"#);
+    let output = repo
+        .wt_command()
+        .args([
+            "switch",
+            "feature",
+            "--allow-branch-mismatch",
+            "--yes",
+            "--no-cd",
+            "--execute",
+            "echo",
+            "--",
+            "{{ branch }}|{{ worktree_path }}",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let path_text = worktrunk::path::to_posix_path(&path.to_string_lossy());
+    assert_eq!(
+        fs::read_to_string(repo.root_path().join("pre.txt"))
+            .unwrap()
+            .trim(),
+        format!("bugfix|bugfix|{path_text}|{path_text}")
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("bugfix|{path_text}")
+    );
+    let post_path = repo.root_path().join("post.txt");
+    wait_for_file_content(&post_path);
+    assert_eq!(
+        fs::read_to_string(post_path).unwrap().trim(),
+        format!("bugfix|bugfix|{path_text}")
+    );
+    assert!(!repo.root_path().join("created.txt").exists());
+}
+
 /// Switch to a detached worktree by absolute path (#1661).
 #[rstest]
 fn test_switch_detached_worktree_by_path(mut repo: TestRepo) {
