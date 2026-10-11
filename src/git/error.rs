@@ -2627,6 +2627,19 @@ mod tests {
         };
         assert_snapshot!(err.render(), @"[31m✗[39m [31m[1mpre-merge user:lint[22m failed (exit code 1)[39m");
 
+        // Silent errors produce empty output
+        assert_eq!(format!("{}", WorktrunkError::CommandNotApproved), "");
+        assert_eq!(
+            format!("{}", WorktrunkError::AlreadyDisplayed { exit_code: 1 }),
+            ""
+        );
+    }
+
+    // An unnamed hook failure renders its template through `format_bash_with_gutter`,
+    // whose output is highlighted only with the feature on.
+    #[cfg(feature = "syntax-highlighting")]
+    #[test]
+    fn snapshot_unnamed_hook_failure_shows_template() {
         let err = WorktrunkError::HookCommandFailed {
             hook_type: HookType::PreCreate,
             source: HookSource::User,
@@ -2640,13 +2653,6 @@ mod tests {
           echo test
           setup failed
         ");
-
-        // Silent errors produce empty output
-        assert_eq!(format!("{}", WorktrunkError::CommandNotApproved), "");
-        assert_eq!(
-            format!("{}", WorktrunkError::AlreadyDisplayed { exit_code: 1 }),
-            ""
-        );
     }
 
     #[test]
