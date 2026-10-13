@@ -526,49 +526,32 @@ fn detect_windows_shell() -> Result<ShellConfig, String> {
 /// (WSL launcher) often comes before Git Bash in PATH.
 #[cfg(windows)]
 fn find_git_bash() -> Option<PathBuf> {
-    // Primary: find git in PATH and derive bash location
-    if let Ok(git_path) = which::which("git")
-        && let Some(bash_path) = git_bash_beside_git(&git_path)
-    {
-        return Some(bash_path);
+    // Ask Git itself so PATH shims resolve to the installation they launch.
+    let git_path = which::which("git").ok()?;
+    let output = Cmd::new(git_path.to_string_lossy())
+        .arg("--exec-path")
+        .env_remove("GIT_EXEC_PATH") // User overrides name helpers, not the install.
+        .run()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
-
-    // Fallback: standard Git for Windows paths (needed on some CI environments
-    // where `which` doesn't find git even though it's installed)
-    let bash_path = PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
-    if bash_path.exists() {
-        return Some(bash_path);
-    }
-
-    // Per-user Git for Windows installation (default path when installed without admin rights)
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let bash_path = PathBuf::from(local_app_data)
-            .join("Programs")
-            .join("Git")
-            .join("bin")
-            .join("bash.exe");
-        if bash_path.exists() {
-            return Some(bash_path);
-        }
-    }
-
-    None
+    let exec_path = std::str::from_utf8(&output.stdout).ok()?;
+    git_bash_from_exec_path(Path::new(exec_path.trim_end()))
 }
 
-/// Derive Git Bash's location from a Git for Windows `git.exe` path.
-///
-/// `git.exe` sits one level below the install root (`Git/cmd`, `Git/bin`) or
-/// below `usr` (`Git/usr/bin`), or two levels below the root in
-/// `Git/mingw64/bin` — the copy MSYS puts first on PATH inside a Git Bash
-/// session. bash.exe is at `Git/bin/bash.exe` or `Git/usr/bin/bash.exe`.
+/// Git for Windows reports `<install>/<runtime>/libexec/git-core` for --exec-path.
+/// The runtime name varies by architecture; Bash belongs to the install root.
 #[cfg(any(windows, test))]
-fn git_bash_beside_git(git_path: &Path) -> Option<PathBuf> {
-    git_path.ancestors().skip(2).take(2).find_map(|root| {
-        [root.join("bin"), root.join("usr").join("bin")]
-            .into_iter()
-            .map(|dir| dir.join("bash.exe"))
-            .find(|bash_path| bash_path.exists())
-    })
+fn git_bash_from_exec_path(exec_path: &Path) -> Option<PathBuf> {
+    if !exec_path.ends_with(Path::new("libexec").join("git-core")) {
+        return None;
+    }
+    let root = exec_path.parent()?.parent()?.parent()?;
+    [root.join("bin"), root.join("usr").join("bin")]
+        .into_iter()
+        .map(|dir| dir.join("bash.exe"))
+        .find(|bash_path| bash_path.is_file())
 }
 
 /// Environment variable naming the directive file for `cd` path changes.
@@ -3055,34 +3038,29 @@ print(*counts)
     }
 
     #[test]
-    fn test_git_bash_beside_git_install_layouts() {
+    fn test_git_bash_from_exec_path() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("Git");
-        for sub in ["bin", "usr/bin", "cmd", "mingw64/bin"] {
-            std::fs::create_dir_all(root.join(sub)).unwrap();
-        }
-        let bin_bash = root.join("bin").join("bash.exe");
+        let bin_bash = root.join("bin/bash.exe");
+        let usr_bash = root.join("usr/bin/bash.exe");
+        std::fs::create_dir_all(bin_bash.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(usr_bash.parent().unwrap()).unwrap();
         std::fs::write(&bin_bash, "").unwrap();
-        std::fs::write(root.join("usr").join("bin").join("bash.exe"), "").unwrap();
+        std::fs::write(&usr_bash, "").unwrap();
 
-        for git in ["cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe"] {
-            assert_eq!(
-                git_bash_beside_git(&root.join(git)),
-                Some(bin_bash.clone()),
-                "{git}"
-            );
-        }
-        assert_eq!(
-            git_bash_beside_git(&root.join("usr/bin/git.exe")),
-            Some(root.join("usr").join("bin").join("bash.exe"))
-        );
-
-        // A minimal install with only usr/bin/bash.exe, reached from mingw64/bin
+        // ARM uses a different runtime prefix; discovery must not enumerate them.
+        let exec_path = root.join("clangarm64/libexec/git-core");
+        assert_eq!(git_bash_from_exec_path(&exec_path), Some(bin_bash.clone()));
+        assert_eq!(git_bash_from_exec_path(&root.join("x/y/z")), None);
         std::fs::remove_file(&bin_bash).unwrap();
-        assert_eq!(
-            git_bash_beside_git(&root.join("mingw64/bin/git.exe")),
-            Some(root.join("usr").join("bin").join("bash.exe"))
-        );
+        assert_eq!(git_bash_from_exec_path(&exec_path), Some(usr_bash.clone()));
+
+        // MinGit can report the same layout without shipping Bash. Never climb
+        // outside that installation to select an unrelated executable.
+        std::fs::remove_file(&usr_bash).unwrap();
+        std::fs::create_dir(dir.path().join("bin")).unwrap();
+        std::fs::write(dir.path().join("bin/bash.exe"), "outside install").unwrap();
+        assert_eq!(git_bash_from_exec_path(&exec_path), None);
     }
 
     #[test]
