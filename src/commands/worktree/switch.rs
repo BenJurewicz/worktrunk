@@ -4,7 +4,8 @@
 //! full switch sequence (bare-repo fix-up, hooks, approval, execution, output)
 //! shared by the `wt switch` argument path and the interactive picker.
 //! Opt-in branch mismatches select an existing expected-path checkout before
-//! pre-switch hooks, then revalidate its identity against a fresh listing.
+//! pre-switch hooks. Planning prefers the requested branch in a fresh listing,
+//! then revalidates the fallback identity if it is still needed.
 
 use std::path::{Path, PathBuf};
 
@@ -995,15 +996,6 @@ fn plan_switch(
     // Record current branch for `wt switch -` support
     let new_previous = repo.current_worktree().branch().ok().flatten();
 
-    if let Some(mismatch) = mismatch {
-        mismatch.require_unchanged(repo)?;
-        return Ok(SwitchPlan::Existing {
-            path: mismatch.path.clone(),
-            branch: mismatch.branch.clone(),
-            new_previous,
-        });
-    }
-
     // Phase 1: Resolve target (validates --create/--base; `pr:`/`mr:` arrived
     // pre-resolved from the caller, ahead of the pre-switch hooks)
     let target = resolve_switch_target(repo, branch, ref_target, create, base)?;
@@ -1065,6 +1057,18 @@ fn plan_switch(
             return Err(GitError::WorktreeNotFoundAtPath { path }.into());
         }
         _ => {}
+    }
+
+    // A pre-switch hook may have created a worktree for the requested branch.
+    // Prefer it before considering the previously selected expected-path fallback.
+    if let Some(mismatch) = mismatch {
+        mismatch.require_unchanged(repo)?;
+        mismatch.warn();
+        return Ok(SwitchPlan::Existing {
+            path: mismatch.path.clone(),
+            branch: mismatch.branch.clone(),
+            new_previous,
+        });
     }
 
     // Phase 3: Compute expected path (only needed for create). `--path`
@@ -1988,10 +1992,6 @@ impl SwitchPipeline<'_> {
         } else {
             None
         };
-        if let Some(mismatch) = &mismatch {
-            mismatch.warn();
-        }
-
         // Run pre-switch hooks before worktree creation. run_pre_switch_hooks
         // resolves symbolic args (`-`, `@`, `^`) first, so {{ branch }} and
         // {{ target }} carry the concrete destination, not the raw token. Skip

@@ -2301,18 +2301,32 @@ pre-switch = "git worktree add '{{ repo_path }}/../repo.feature' feature"
 }
 
 #[rstest]
-fn test_switch_allow_branch_mismatch_branch_priority(mut repo: TestRepo) {
+#[case::before_hook(false)]
+#[case::during_hook(true)]
+fn test_switch_allow_branch_mismatch_branch_priority(
+    mut repo: TestRepo,
+    #[case] during_hook: bool,
+) {
     let collision = repo.add_worktree("feature");
     repo.run_git_in(&collision, &["switch", "-c", "bugfix"]);
     let actual = repo.root_path().parent().unwrap().join("elsewhere");
-    repo.run_git(&["worktree", "add", actual.to_str().unwrap(), "feature"]);
+    if during_hook {
+        assert!(!actual.exists());
+        repo.write_project_config(
+            r#"
+pre-switch = "git worktree add '{{ repo_path }}/../elsewhere' feature"
+"#,
+        );
+    } else {
+        repo.run_git(&["worktree", "add", actual.to_str().unwrap(), "feature"]);
+    }
     let output = repo
         .wt_command()
         .args([
             "switch",
             "feature",
             "--allow-branch-mismatch",
-            "--no-hooks",
+            if during_hook { "--yes" } else { "--no-hooks" },
             "--format=json",
             "--no-cd",
         ])
